@@ -28,3 +28,26 @@ class Delivery(BaseModel):
     recipient: str = Field(min_length=2, max_length=100)
     cadence: Literal['once', 'daily']
     scheduled_at: datetime | None = None
+
+
+class MeterReadingIn(BaseModel):
+    reading_id: str = Field(min_length=1, max_length=60)
+    shop: str = Field(min_length=1, max_length=80)
+    read_at: datetime
+    liters: float = Field(ge=0, le=100000)
+
+
+class MeterSubmission(BaseModel):
+    readings: list[MeterReadingIn] = Field(min_length=1, max_length=5000)
+
+
+class WashWindowIn(BaseModel):
+    shop: str = Field(min_length=1, max_length=80)
+    batch_id: str = Field(min_length=1, max_length=60)
+    started_at: datetime
+    finished_at: datetime
+
+
+class WindowSync(BaseModel):
+    dataset_id: int = Field(gt=0)
+    windows: list[WashWindowIn] = Field(min_length=1, max_length=5000)

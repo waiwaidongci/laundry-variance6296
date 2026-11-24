@@ -6,9 +6,26 @@ from src.config.settings import ARTIFACTS
 from src.constants.enums import Role
 from src.controllers.query import delivery_status, jobs, recent_activity, require_row, revisions
 from src.models.tables import datasets, runs
-from src.schemas.requests import Delivery, Import, Login, Review, Run
+from src.schemas.requests import (
+    Delivery,
+    Import,
+    Login,
+    MeterSubmission,
+    Review,
+    Run,
+    WindowSync,
+)
 from src.services.data import PROFILE, csv_records, save_revision
 from src.services.domain import sample_rows
+from src.services.meter_reconciliation import (
+    active_versions,
+    list_readings,
+    meter_jobs_recent,
+    register_windows,
+    require_version,
+    submit_readings,
+    version_history,
+)
 from src.services.workflow import add_run, cancel_schedule, review_run, schedule_report
 from src.utils.exports import write_csv
 from src.utils.security import allowed, authenticate, signed_in
@@ -100,6 +117,38 @@ def stop_schedule(key: int, account=Depends(reviewer)):
 @router.get('/audit')
 def activity(account=Depends(signed_in)):
     return recent_activity()
+
+
+@router.post('/wash-windows', status_code=201)
+def sync_windows(body: WindowSync, account=Depends(analyst)):
+    windows = [item.model_dump() for item in body.windows]
+    return register_windows(body.dataset_id, windows, account['username'])
+
+
+@router.post('/meter-readings', status_code=202)
+def upload_readings(body: MeterSubmission, account=Depends(analyst)):
+    rows = [item.model_dump() for item in body.readings]
+    return submit_readings(rows, account['username'])
+
+
+@router.get('/meter-readings')
+def readings(account=Depends(signed_in), shop: str | None = None):
+    return {'readings': list_readings(shop)}
+
+
+@router.get('/meter-versions')
+def versions(account=Depends(signed_in), shop: str | None = None):
+    return {'active': active_versions(), 'history': version_history(shop)}
+
+
+@router.get('/meter-versions/{key}')
+def version_detail(key: int, account=Depends(signed_in)):
+    return require_version(key)
+
+
+@router.get('/meter-jobs')
+def meter_jobs(account=Depends(signed_in)):
+    return {'jobs': meter_jobs_recent()}
 
 
 @router.get('/runs/{key}/report.csv')

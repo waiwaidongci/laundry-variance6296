@@ -7,14 +7,15 @@ from tempfile import NamedTemporaryFile
 from src.config.settings import ARTIFACTS
 from src.models.database import cache
 from src.services.domain import compute
+from src.services.meter_reconciliation import claim_meter_job, recompute_shop
 from src.services.workflow import claim_run, finish_run, publish_due
 from src.utils.exports import write_csv
 
 
 def calculate(job):
-    key, claim, rows, options = job
+    key, claim, rows, options, reconciliation = job
     try:
-        report = compute(rows, options)
+        report = compute(rows, options, reconciliation)
         report['columns'] = list(dict.fromkeys(key for row in report['rows'] for key in row))
         report['metric_order'] = list(report['metrics'])
         json.dumps(report, allow_nan=False)
@@ -31,12 +32,23 @@ def calculate(job):
         finish_run(key, claim, report, None)
 
 
+def reconcile_meters():
+    payload = claim_meter_job()
+    if payload is None:
+        return
+    try:
+        recompute_shop(payload)
+    except Exception:
+        logging.exception('Meter reconciliation job %s failed', payload['job_id'])
+
+
 def work():
     while True:
         try:
             job = claim_run()
             if job:
                 calculate(job)
+            reconcile_meters()
             publish_due()
             cache.set('worker:heartbeat', str(time.time()), ex=25)
         except Exception:

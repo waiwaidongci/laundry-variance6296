@@ -5,6 +5,8 @@ from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from src.services.matching import CERTAIN, DISPUTED
+
 
 ALL = '*'
 UNKNOWN = '未知'
@@ -150,6 +152,59 @@ def _weighted_rate(liters, kg):
     return float((liters / kg).quantize(RATIO_PRECISION)) if kg else None
 
 
+def build_reconciliation_view(selected_batches, reconciliation, scope_shops, meter_limit):
+    """把分析时刻冻结的对账版本快照，折算到当前筛选范围。
+
+    reconciliation: {shop: version_row}，version_row 含 pairings、unmatched_*、
+    disputed_edges 等不可变字段。范围内若某工坊没有生效版本，视为该工坊读数
+    尚未完成对账，整批发售拦截。
+    """
+    view = {
+        'pairings': [], 'version_ids': {}, 'blockers': [],
+        'certain_count': 0, 'disputed_count': 0,
+        'unmatched_reading_count': 0, 'unmatched_batch_count': 0,
+        'gap_total': 0.0, 'missing_shops': [],
+    }
+    batch_ids_in_scope = {batch.batch_id for batch in selected_batches}
+    over_limit = []
+    for shop in sorted(scope_shops):
+        version = reconciliation.get(shop)
+        if version is None:
+            view['missing_shops'].append(shop)
+            continue
+        view['version_ids'][shop] = version['id']
+        pairings = [pair for pair in version['pairings']
+                    if pair['batch_id'] in batch_ids_in_scope]
+        view['pairings'].extend(pairings)
+        view['certain_count'] += sum(1 for pair in pairings if pair['status'] == CERTAIN)
+        view['disputed_count'] += sum(1 for pair in pairings if pair['status'] == DISPUTED)
+        # 范围内批次维度的未配/争议统计
+        scope_batch_ids = {batch.batch_id for batch in selected_batches if batch.shop == shop}
+        matched_batch_ids = {pair['batch_id'] for pair in pairings}
+        view['unmatched_batch_count'] += len(scope_batch_ids - matched_batch_ids)
+        view['unmatched_reading_count'] += len(version.get('unmatched_reading_ids', []))
+        for pair in pairings:
+            if pair['status'] == CERTAIN:
+                view['gap_total'] += pair['gap']
+                if pair['gap'] > float(meter_limit):
+                    over_limit.append((pair['reading_id'], pair['batch_id'], pair['gap']))
+    view['gap_total'] = round(view['gap_total'], 6)
+    if view['missing_shops']:
+        view['blockers'].append(
+            '以下工坊尚无生效的水表对账版本，请先完成读数重算：' + '、'.join(view['missing_shops']))
+    if view['disputed_count']:
+        view['blockers'].append(
+            f'{view["disputed_count"]} 对配对存在多种同基数配法，争议批次不通过水表对账，请现场核对读数时刻。')
+    if view['unmatched_reading_count']:
+        view['blockers'].append(f'{view["unmatched_reading_count"]} 条抄表读数未配上任何洗程批次。')
+    if view['unmatched_batch_count']:
+        view['blockers'].append(f'{view["unmatched_batch_count"]} 个批次没有任何可配水表读数，不通过水表对账。')
+    if over_limit:
+        detail = '；'.join(f'{reading}/{batch} 差 {gap:f} L' for reading, batch, gap in over_limit[:5])
+        view['blockers'].append(f'确定配对的水表差超出 {meter_limit:f} L 容差：{detail}')
+    return view
+
+
 def _result_row(level, shop, textile, water, *, day='', batch_id=''):
     return {
         '粒度': level,
@@ -177,7 +232,7 @@ def _result_row(level, shop, textile, water, *, day='', batch_id=''):
     }
 
 
-def compute(rows: list[dict], options: dict) -> dict:
+def compute(rows: list[dict], options: dict, reconciliation: dict | None = None) -> dict:
     if not 1 <= len(rows) <= 5000:
         raise ValueError('请导入 1 至 5000 个洗涤批次，超出时按生产周期拆分台账。')
     shop_filter = options.get('shop', ALL)
@@ -232,6 +287,14 @@ def compute(rows: list[dict], options: dict) -> dict:
         blockers.append('耗水分解残差非零，请复核基准和三项差异。')
     if total.meter_absolute_gap > meter_limit:
         blockers.append(f'批次水表累计绝对差超过 {meter_limit:f} L 容差，请核对批次实耗与水表的计量窗口。')
+
+    # 独立水表对账：抄表组读数不带批号，按同工坊与洗程时刻做最大匹配；未配上或
+    # 存在争议配对的批次不通过水表对账。reconciliation 为分析时刻冻结的版本快照。
+    scope_shops = {shop_filter} if shop_filter != ALL else set(groups)
+    reconciliation_view = build_reconciliation_view(
+        selected, reconciliation or {}, scope_shops, meter_limit,
+    )
+    blockers.extend(reconciliation_view['blockers'])
     status = '复核发布已拦截' if blockers else '对账通过，可提交复核'
     metrics = {
         '纳入批次': len(selected),
@@ -243,17 +306,34 @@ def compute(rows: list[dict], options: dict) -> dict:
         '分解残差（L）': float(total.residual),
         '水表累计绝对差（L）': float(total.meter_absolute_gap),
         '水表累计容差（L）': float(meter_limit),
+        '确定配对': reconciliation_view['certain_count'],
+        '争议配对': reconciliation_view['disputed_count'],
+        '未配读数': reconciliation_view['unmatched_reading_count'],
+        '未配批次': reconciliation_view['unmatched_batch_count'],
+        '确定配对水表差合计（L）': reconciliation_view['gap_total'],
         '对账状态': status,
     }
     return {
         'headline': f'{shop_scope} / {textile_scope} · {status}',
         'metrics': metrics,
         'rows': result_rows,
+        'reconciliation': {
+            'version_ids': reconciliation_view['version_ids'],
+            'pairings': reconciliation_view['pairings'],
+            'missing_shops': reconciliation_view['missing_shops'],
+            'certain_count': reconciliation_view['certain_count'],
+            'disputed_count': reconciliation_view['disputed_count'],
+            'unmatched_reading_count': reconciliation_view['unmatched_reading_count'],
+            'unmatched_batch_count': reconciliation_view['unmatched_batch_count'],
+            'gap_total': reconciliation_view['gap_total'],
+        },
         'notes': [
             '用工坊与布类全名筛选。选「展开批次」可在每个工坊与布类交叉项下查看生产日和洗涤批号。各层均为独立小计。',
             '已匹配计划基准为计划 kg × 计划定额。标准差为计划 kg ×（执行定额 − 计划定额），量与结构差为（实洗 kg − 计划 kg）× 执行定额，效率差为实耗 − 实洗 kg × 执行定额。',
             '各层实耗由已匹配计划基准、三项差异和缺标实耗相加得到。加权实耗用各层总实耗除以实洗总 kg，分母为零时留空。正差表示增加耗水。',
             '定额未知的批次保留重量、实耗和水表读数，并计入缺标实耗。独立水表按同一批次的计量窗口对账，逐批取绝对差再加总。复核门槛适用于本次筛选范围。',
+            '抄表读数不带洗涤批号：按同工坊且读数时刻落在洗程窗口内建立候选，求最大基数匹配；仅在所有最大匹配中都出现的配对才记为确定配对，争议配对、未配读数与未配批次均不通过水表对账。',
+            '本结果冻结分析时刻各工坊的生效对账版本及配对明细；报告批准后即便随后因迟到读数重算，已批准报告仍沿用当时的配对。',
             *blockers,
         ],
         'chart': {

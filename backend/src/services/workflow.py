@@ -7,6 +7,7 @@ from src.constants.enums import State
 from src.models.database import add_event, engine, fetch_one
 from src.models.tables import datasets, deliveries, runs, schedules
 from src.services.data import parse_options
+from src.services.meter_reconciliation import active_version_for_shops
 
 
 def add_run(body, actor):
@@ -34,7 +35,9 @@ def claim_run():
         if claim.rowcount != 1:
             return None
         data = fetch_one(connection, datasets, run['dataset_id'])
-        return key, now, data['records'], run['options']
+        shops = {row.get('shop') for row in data['records'] if row.get('shop')}
+        reconciliation = active_version_for_shops(shops)
+        return key, now, data['records'], run['options'], reconciliation
 
 
 def finish_run(key, claim, result, error):
