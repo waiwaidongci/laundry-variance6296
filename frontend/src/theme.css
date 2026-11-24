@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&family=PT+Serif&display=swap');
+:root {
+  --text-font: 'Quicksand'; --title-font: 'PT Serif';
+  --paper: oklch(.975 .012 185); --surface: oklch(.994 .006 185);
+  --ink: oklch(.235 .035 185); --quiet: oklch(.435 .038 185);
+  --stripe: oklch(.961 .014 185); --rule: oklch(.858 .024 185);
+  --accent: oklch(.445 0.081 185); --button-ink: oklch(.98 .007 185);
+  --focus: oklch(.64 0.081 185);
+  --side: oklch(.923 .029 185);
+  --side-ink: oklch(.255 .033 185);
+  --highlight: oklch(.866 .045 185);
+  --highlight-edge: oklch(.49 .10 185);
+  --side-width: 230px; --side-pad: 1.45rem;
+  --login-ratio: 1.35fr; --report-stripe: 7px;
+}
