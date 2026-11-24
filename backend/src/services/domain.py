@@ -1,7 +1,7 @@
 """Batch water variance and meter reconciliation for the wash-shop pivot."""
 
 from collections import defaultdict
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -205,6 +205,31 @@ def build_reconciliation_view(selected_batches, reconciliation, scope_shops, met
     return view
 
 
+def _apply_confirmed_meter_readings(selected_batches, reconciliation_view):
+    """Use frozen certain-pair readings in the business result rows."""
+    confirmed = {
+        pair['batch_id']: Decimal(str(pair['reading_liters']))
+        for pair in reconciliation_view['pairings']
+        if pair['status'] == CERTAIN
+    }
+    if not confirmed:
+        return selected_batches
+
+    reconciled = []
+    for batch in selected_batches:
+        reading_liters = confirmed.get(batch.batch_id)
+        if reading_liters is None:
+            reconciled.append(batch)
+            continue
+        water = replace(
+            batch.water,
+            meter_liters=reading_liters,
+            meter_absolute_gap=abs(batch.water.actual_liters - reading_liters),
+        )
+        reconciled.append(replace(batch, water=water))
+    return reconciled
+
+
 def _result_row(level, shop, textile, water, *, day='', batch_id=''):
     return {
         '粒度': level,
@@ -259,6 +284,14 @@ def compute(rows: list[dict], options: dict, reconciliation: dict | None = None)
     if not selected:
         raise ValueError('筛选范围内没有洗涤批次，请按台账填写工坊和布类全名，或用 * 查看全部。')
 
+    # 独立水表对账：抄表组读数不带批号，按同工坊与洗程时刻做最大匹配；未配上或
+    # 存在争议配对的批次不通过水表对账。reconciliation 为分析时刻冻结的版本快照。
+    scope_shops = {batch.shop for batch in selected}
+    reconciliation_view = build_reconciliation_view(
+        selected, reconciliation or {}, scope_shops, meter_limit,
+    )
+    selected = _apply_confirmed_meter_readings(selected, reconciliation_view)
+
     groups = defaultdict(lambda: defaultdict(list))
     for batch in selected:
         groups[batch.shop][batch.textile].append(batch)
@@ -288,12 +321,6 @@ def compute(rows: list[dict], options: dict, reconciliation: dict | None = None)
     if total.meter_absolute_gap > meter_limit:
         blockers.append(f'批次水表累计绝对差超过 {meter_limit:f} L 容差，请核对批次实耗与水表的计量窗口。')
 
-    # 独立水表对账：抄表组读数不带批号，按同工坊与洗程时刻做最大匹配；未配上或
-    # 存在争议配对的批次不通过水表对账。reconciliation 为分析时刻冻结的版本快照。
-    scope_shops = {shop_filter} if shop_filter != ALL else set(groups)
-    reconciliation_view = build_reconciliation_view(
-        selected, reconciliation or {}, scope_shops, meter_limit,
-    )
     blockers.extend(reconciliation_view['blockers'])
     status = '复核发布已拦截' if blockers else '对账通过，可提交复核'
     metrics = {
